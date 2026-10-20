@@ -103,13 +103,11 @@ impl MemTable {
     /// Week 2 Day 6: also append the data to the write-ahead log.
     /// Week 3 Day 5: route the write through the batch WAL implementation.
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        let exists = match self.get(_key) {
-            Some(v) => true,
-            None => false,
-        };
+        let exists = self.get(_key).is_some();
         self.map
             .insert(Bytes::copy_from_slice(_key), Bytes::copy_from_slice(_value));
         if !exists {
+            // count number of keys for now
             self.approximate_size.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
