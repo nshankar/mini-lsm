@@ -127,7 +127,17 @@ impl MemTable {
 
     /// Get an iterator over a range of keys.
     pub fn scan(&self, _lower: Bound<&[u8]>, _upper: Bound<&[u8]>) -> MemTableIterator {
-        unimplemented!()
+        let bounds = (
+            _lower.map(Bytes::copy_from_slice),
+            _upper.map(Bytes::copy_from_slice),
+        );
+        let mut iter = MemTableIterator::new(
+            self.map.clone(),
+            |map| map.range(bounds),
+            (Bytes::new(), Bytes::new()),
+        );
+        iter.next().unwrap();
+        iter
     }
 
     /// Flush the mem-table to SSTable. Implement in week 1 day 6.
@@ -173,18 +183,25 @@ impl StorageIterator for MemTableIterator {
     type KeyType<'a> = KeySlice<'a>;
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        let (_, value) = self.borrow_item();
+        value
     }
 
     fn key(&self) -> KeySlice<'_> {
-        unimplemented!()
+        let (key, _) = self.borrow_item();
+        KeySlice::from_slice(key)
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.key().is_empty()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let (key, value) = match self.with_iter_mut(|iter| iter.next()) {
+            Some(entry) => (entry.key().clone(), entry.value().clone()),
+            None => (Bytes::new(), Bytes::new()),
+        };
+        self.with_item_mut(|item| *item = (key, value));
+        Ok(())
     }
 }

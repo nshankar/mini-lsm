@@ -57,9 +57,31 @@ pub struct MergeIterator<I: StorageIterator> {
     current: Option<HeapWrapper<I>>,
 }
 
+impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> MergeIterator<I> {
+    fn debug_heap(&self) -> Vec<(usize, KeySlice<'_>, &[u8])> {
+        let mut v: Vec<_> = self
+            .iters
+            .iter()
+            .map(|w| (w.0, w.1.key(), w.1.value()))
+            .collect();
+        // sort into pop order: smallest key first, ties by smallest index
+        v.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        v
+    }
+}
+
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let mut heap: BinaryHeap<HeapWrapper<I>> = BinaryHeap::new();
+        for (i, iter) in iters.into_iter().enumerate() {
+            if iter.is_valid() {
+                heap.push(HeapWrapper(i, iter));
+            }
+        }
+        MergeIterator {
+            current: heap.pop(),
+            iters: heap,
+        }
     }
 }
 
@@ -69,18 +91,50 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice<'_> {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .expect("key() called on invalid iterator")
+            .1
+            .key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .expect("value() called on invalid iterator")
+            .1
+            .value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current.is_some()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let current_key = self
+            .current
+            .as_ref()
+            .expect("next() called on invalid iterator")
+            .1
+            .key()
+            .to_key_vec();
+
+        self.iters.push(
+            self.current
+                .take()
+                .expect("next() called on invalid iterator"),
+        );
+        // unwraps below can't raise because we short circuit on an empty heap
+        while !self.iters.is_empty()
+            && self.iters.peek().unwrap().1.key() == current_key.as_key_slice()
+        {
+            let mut top = self.iters.pop().unwrap();
+            top.1.next()?;
+            if top.1.is_valid() {
+                self.iters.push(top);
+            }
+        }
+        self.current = self.iters.pop();
+        Ok(())
     }
 }
