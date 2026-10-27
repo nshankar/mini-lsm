@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::cmp::{self};
 use std::collections::BinaryHeap;
 
@@ -111,28 +108,26 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     }
 
     fn next(&mut self) -> Result<()> {
-        let current_key = self
+        let mut current = self
             .current
-            .as_ref()
-            .expect("next() called on invalid iterator")
-            .1
-            .key()
-            .to_key_vec();
+            .take()
+            .expect("next() called on invalid iterator");
 
-        self.iters.push(
-            self.current
-                .take()
-                .expect("next() called on invalid iterator"),
-        );
-        // unwraps below can't raise because we short circuit on an empty heap
-        while !self.iters.is_empty()
-            && self.iters.peek().unwrap().1.key() == current_key.as_key_slice()
+        while self
+            .iters
+            .peek()
+            .is_some_and(|top| top.1.key() == current.1.key())
         {
             let mut top = self.iters.pop().unwrap();
             top.1.next()?;
             if top.1.is_valid() {
                 self.iters.push(top);
             }
+        }
+
+        current.1.next()?;
+        if current.1.is_valid() {
+            self.iters.push(current);
         }
         self.current = self.iters.pop();
         Ok(())
