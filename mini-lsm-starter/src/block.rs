@@ -26,6 +26,34 @@ pub struct Block {
 }
 
 impl Block {
+    pub fn new(data: Vec<u8>, offsets: Vec<u16>) -> Self {
+        assert!(
+            offsets.len() <= u16::MAX as usize,
+            "too many entries: {}",
+            offsets.len()
+        );
+        if let Some(&first) = offsets.first() {
+            assert!(first == 0, "first offset is {first}, expected 0");
+        }
+        for (i, w) in offsets.windows(2).enumerate() {
+            assert!(
+                w[0] <= w[1],
+                "offset {} ({}) > offset {} ({})",
+                i,
+                w[0],
+                i + 1,
+                w[1]
+            );
+        }
+        if let Some(&last) = offsets.last() {
+            assert!(
+                last as usize <= data.len(),
+                "last offset {last} past data ({} bytes)",
+                data.len()
+            );
+        }
+        Block { data, offsets }
+    }
     /// Encode the internal data to the data layout illustrated in the course
     /// Note: You may want to recheck if any of the expected field is missing from your output
     pub fn encode(&self) -> Bytes {
@@ -46,17 +74,16 @@ impl Block {
 
     /// Decode from the data layout, transform the input `data` to a single `Block`
     pub fn decode(data: &[u8]) -> Self {
-        // TODO: panic on invalid input
         const U16_SIZE: usize = std::mem::size_of::<u16>();
         let Some(n_elements_bytes) = data.last_chunk::<U16_SIZE>() else {
-            return Block {
-                data: Vec::new(),
-                offsets: Vec::new(),
-            };
+            panic!(
+                "corrupt block: {} bytes, too short for element count",
+                data.len()
+            );
         };
         let n_elements = u16::from_be_bytes(*n_elements_bytes) as usize;
 
-        let offsets_start = data.len() - (n_elements + 1) * U16_SIZE;
+        let offsets_start = data.len() - (n_elements + 1) * U16_SIZE; // underflow?
         let offsets_end = data.len() - U16_SIZE;
         let offsets: Vec<u16> = data[offsets_start..offsets_end]
             .chunks_exact(U16_SIZE)
@@ -64,6 +91,6 @@ impl Block {
             .collect();
         let data = data[..offsets_start].to_vec();
 
-        Block { data, offsets }
+        Block::new(data, offsets)
     }
 }

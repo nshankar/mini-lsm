@@ -54,19 +54,6 @@ pub struct MergeIterator<I: StorageIterator> {
     current: Option<HeapWrapper<I>>,
 }
 
-impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> MergeIterator<I> {
-    fn debug_heap(&self) -> Vec<(usize, KeySlice<'_>, &[u8])> {
-        let mut v: Vec<_> = self
-            .iters
-            .iter()
-            .map(|w| (w.0, w.1.key(), w.1.value()))
-            .collect();
-        // sort into pop order: smallest key first, ties by smallest index
-        v.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-        v
-    }
-}
-
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
         let mut heap: BinaryHeap<HeapWrapper<I>> = BinaryHeap::new();
