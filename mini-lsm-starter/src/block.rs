@@ -12,14 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 mod builder;
 mod iterator;
 
 pub use builder::BlockBuilder;
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 pub use iterator::BlockIterator;
 
 /// A block is the smallest unit of read and caching in LSM tree. It is a collection of sorted key-value pairs.
@@ -32,11 +29,41 @@ impl Block {
     /// Encode the internal data to the data layout illustrated in the course
     /// Note: You may want to recheck if any of the expected field is missing from your output
     pub fn encode(&self) -> Bytes {
-        unimplemented!()
+        // The 3 blocks: data, offsets, extra
+        let total_size = self.data.len()
+            + self.offsets.len() * std::mem::size_of::<u16>()
+            + std::mem::size_of::<u16>();
+        let mut buf = BytesMut::with_capacity(total_size);
+
+        // all writes below are big endian
+        buf.put_slice(&self.data);
+        for &offset in &self.offsets {
+            buf.put_u16(offset)
+        }
+        buf.put_u16(self.offsets.len() as u16);
+        buf.freeze()
     }
 
     /// Decode from the data layout, transform the input `data` to a single `Block`
     pub fn decode(data: &[u8]) -> Self {
-        unimplemented!()
+        // TODO: panic on invalid input
+        const U16_SIZE: usize = std::mem::size_of::<u16>();
+        let Some(n_elements_bytes) = data.last_chunk::<U16_SIZE>() else {
+            return Block {
+                data: Vec::new(),
+                offsets: Vec::new(),
+            };
+        };
+        let n_elements = u16::from_be_bytes(*n_elements_bytes) as usize;
+
+        let offsets_start = data.len() - (n_elements + 1) * U16_SIZE;
+        let offsets_end = data.len() - U16_SIZE;
+        let offsets: Vec<u16> = data[offsets_start..offsets_end]
+            .chunks_exact(U16_SIZE)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        let data = data[..offsets_start].to_vec();
+
+        Block { data, offsets }
     }
 }

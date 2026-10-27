@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use crate::key::{KeySlice, KeyVec};
+use bytes::BufMut;
 
 use super::Block;
 
@@ -34,23 +32,50 @@ pub struct BlockBuilder {
 impl BlockBuilder {
     /// Creates a new block builder.
     pub fn new(block_size: usize) -> Self {
-        unimplemented!()
+        BlockBuilder {
+            offsets: Vec::new(),
+            data: Vec::new(),
+            block_size,
+            first_key: KeyVec::new(),
+        }
     }
 
     /// Adds a key-value pair to the block. Returns false when the block is full.
     /// You may find the `bytes::BufMut` trait useful for manipulating binary data.
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
-        unimplemented!()
+        // assume keys are monotonically increasing
+        if self.is_empty() {
+            self.first_key = key.to_key_vec();
+        } else {
+            if self.data.len() + key.len() + value.len() + 3 * std::mem::size_of::<u16>()
+                > self.block_size
+            {
+                // adding this key, value pair would exceed the block_size
+                return false;
+            }
+        }
+
+        self.offsets.push(self.data.len() as u16);
+
+        self.data.put_u16(key.len() as u16);
+        self.data.put_slice(key.raw_ref());
+        self.data.put_u16(value.len() as u16);
+        self.data.put_slice(value);
+
+        true
     }
 
     /// Check if there is no key-value pair in the block.
     pub fn is_empty(&self) -> bool {
-        unimplemented!()
+        self.offsets.is_empty()
     }
 
     /// Finalize the block.
     pub fn build(self) -> Block {
-        unimplemented!()
+        Block {
+            data: self.data,
+            offsets: self.offsets,
+        }
     }
 }
