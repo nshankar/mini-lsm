@@ -112,17 +112,15 @@ impl BlockIterator {
     pub fn seek_to_key(&mut self, key: KeySlice) {
         let mut left = 0;
         let mut right = self.block.offsets.len();
-        let mut idx = right / 2;
 
         // assumes no duplicates
         while left < right {
+            let idx = left + (right - left) / 2;
             self._seek_to_key_idx(idx);
             if self.key() < key {
                 left = idx + 1;
-                idx = left + (right - left) / 2
             } else {
                 right = idx;
-                idx = left + (right - left) / 2
             }
         }
         self._seek_to_key_idx(left)
