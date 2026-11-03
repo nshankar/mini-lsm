@@ -97,6 +97,7 @@ impl BlockIterator {
 
         (self.idx, self.key, self.value_range) = (idx, key, value_range);
     }
+
     /// Seeks to the first key in the block.
     pub fn seek_to_first(&mut self) {
         self._seek_to_key_idx(0);
