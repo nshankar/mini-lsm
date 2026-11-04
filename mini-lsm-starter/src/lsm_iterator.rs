@@ -14,21 +14,31 @@
 
 use anyhow::Result;
 
+use crate::table::SsTableIterator;
 use crate::{
-    iterators::{StorageIterator, merge_iterator::MergeIterator},
+    iterators::{
+        StorageIterator, merge_iterator::MergeIterator, two_merge_iterator::TwoMergeIterator,
+    },
     mem_table::MemTableIterator,
 };
+use bytes::Bytes;
+use std::ops::Bound;
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the course for multiple times.
-type LsmIteratorInner = MergeIterator<MemTableIterator>;
+type LsmIteratorInner =
+    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>;
 
 pub struct LsmIterator {
     inner: LsmIteratorInner,
+    end_bound: Bound<Bytes>,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        let mut iter = Self { inner: iter };
+    pub(crate) fn new(iter: LsmIteratorInner, end_bound: Bound<Bytes>) -> Result<Self> {
+        let mut iter = Self {
+            inner: iter,
+            end_bound,
+        };
         iter.skip_deleted()?; // the very first entry may be a tombstone
         Ok(iter)
     }
@@ -46,7 +56,11 @@ impl StorageIterator for LsmIterator {
     type KeyType<'a> = &'a [u8];
 
     fn is_valid(&self) -> bool {
-        self.inner.is_valid()
+        match &self.end_bound {
+            Bound::Included(x) => self.inner.is_valid() && self.inner.key().raw_ref() <= x,
+            Bound::Excluded(x) => self.inner.is_valid() && self.inner.key().raw_ref() < x,
+            Bound::Unbounded => self.inner.is_valid(),
+        }
     }
 
     fn key(&self) -> &[u8] {
