@@ -16,7 +16,6 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::collections::HashMap;
-use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -38,7 +37,8 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableIterator};
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
+use std::ops::Bound::{self, Excluded, Included, Unbounded};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -61,6 +61,23 @@ pub struct LsmStorageState {
 pub enum WriteBatchRecord<T: AsRef<[u8]>> {
     Put(T, T),
     Del(T),
+}
+
+pub type KeyRange<'a> = (Bound<&'a [u8]>, Bound<&'a [u8]>);
+/// True if range `a` and range `b` share at least one key.
+pub fn range_overlap(a: KeyRange, b: KeyRange) -> bool {
+    !ends_before(a.1, b.0) && !ends_before(b.1, a.0)
+}
+
+/// True if a range ending at `upper` lies entirely before a range starting at `lower`.
+fn ends_before(upper: Bound<&[u8]>, lower: Bound<&[u8]>) -> bool {
+    match (upper, lower) {
+        (Unbounded, _) | (_, Unbounded) => false,
+        (Included(u), Included(l)) => u < l,
+        (Included(u), Excluded(l)) | (Excluded(u), Included(l)) | (Excluded(u), Excluded(l)) => {
+            u <= l
+        }
+    }
 }
 
 impl LsmStorageState {
@@ -183,7 +200,9 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        self.compaction_notifier.send(()).ok();
+        self.flush_notifier.send(()).ok();
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -270,6 +289,7 @@ impl LsmStorageInner {
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
         let path = path.as_ref();
+        std::fs::create_dir_all(path)?;
         let state = LsmStorageState::create(&options);
 
         let compaction_controller = match &options.compaction_options {
@@ -399,7 +419,38 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        let Some(oldest_memtable) = self.state.read().imm_memtables.last().cloned() else {
+            return Ok(());
+        };
+        let mut sst_builder = SsTableBuilder::new(self.options.block_size);
+        oldest_memtable.flush(&mut sst_builder)?;
+
+        let sst_id = self.next_sst_id();
+        let sst = sst_builder.build(
+            sst_id,
+            Some(self.block_cache.clone()),
+            self.path_of_sst(sst_id),
+        )?;
+
+        let flushed_memtable_id = oldest_memtable.id();
+
+        let _state_guard = self.state_lock.lock();
+        let mut new_state = self.state.read().as_ref().clone();
+        if new_state
+            .imm_memtables
+            .last()
+            .is_some_and(|t| t.id() == flushed_memtable_id)
+        {
+            new_state.imm_memtables.pop();
+            new_state.sstables.insert(sst_id, Arc::new(sst));
+            new_state.l0_sstables.insert(0, sst_id);
+            *self.state.write() = Arc::new(new_state);
+        } else {
+            drop(sst);
+            let _ = std::fs::remove_file(self.path_of_sst(sst_id)); // best-effort cleanup
+            // TODO: Error?
+        }
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -421,11 +472,20 @@ impl LsmStorageInner {
         }
         let merged_memtable_iter = MergeIterator::create(iters);
 
-        let mut ss_table_iters = Vec::new();
+        let mut sst_iters = Vec::new();
         for table in snapshot.l0_ssts() {
             let table = Arc::clone(table);
-            // TODO: skip tables that cannot overlap [lower, upper] using first_key/last_key,
-            let ss_table_iter = match _lower {
+            // skip tables that cannot overlap [_lower, _upper] using first_key/last_key,
+            if !range_overlap(
+                (
+                    Bound::Included(table.first_key().raw_ref()),
+                    Bound::Included(table.last_key().raw_ref()),
+                ),
+                (_lower, _upper),
+            ) {
+                continue;
+            }
+            let sst_iter = match _lower {
                 Bound::Included(x) => {
                     SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(x))?
                 }
@@ -439,12 +499,12 @@ impl LsmStorageInner {
                 }
                 Bound::Unbounded => SsTableIterator::create_and_seek_to_first(table)?,
             };
-            ss_table_iters.push(Box::new(ss_table_iter));
+            sst_iters.push(Box::new(sst_iter));
         }
-        let merged_ss_table_iter = MergeIterator::create(ss_table_iters);
+        let merged_sst_iter = MergeIterator::create(sst_iters);
 
         Ok(FusedIterator::new(LsmIterator::new(
-            TwoMergeIterator::create(merged_memtable_iter, merged_ss_table_iter)?,
+            TwoMergeIterator::create(merged_memtable_iter, merged_sst_iter)?,
             _upper.map(Bytes::copy_from_slice),
         )?))
     }

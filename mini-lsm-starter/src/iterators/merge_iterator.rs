@@ -119,4 +119,18 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
         self.current = self.iters.pop();
         Ok(())
     }
+
+    fn num_active_iterators(&self) -> usize {
+        let mut s: usize = 0;
+        for iter in self.iters.iter() {
+            if iter.1.is_valid() {
+                s += 1;
+            }
+        }
+
+        if self.current.as_ref().is_some_and(|c| c.1.is_valid()) {
+            s += 1;
+        }
+        s
+    }
 }
