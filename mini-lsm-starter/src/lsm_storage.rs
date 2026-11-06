@@ -82,6 +82,16 @@ impl LsmStorageState {
             sstables: Default::default(),
         }
     }
+
+    /// All memtables from newest to oldest: the current one, then the immutable ones.
+    fn memtables(&self) -> impl Iterator<Item = &Arc<MemTable>> {
+        std::iter::once(&self.memtable).chain(self.imm_memtables.iter())
+    }
+
+    /// All L0 SSTs from newest to oldest.
+    fn l0_ssts(&self) -> impl Iterator<Item = &Arc<SsTable>> {
+        self.l0_sstables.iter().map(|id| &self.sstables[id])
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -291,6 +301,11 @@ impl LsmStorageInner {
         Ok(storage)
     }
 
+    /// Take a consistent, immutable view of the current state.
+    fn snapshot(&self) -> Arc<LsmStorageState> {
+        Arc::clone(&self.state.read())
+    }
+
     pub fn sync(&self) -> Result<()> {
         unimplemented!()
     }
@@ -302,12 +317,9 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        let snapshot = {
-            let guard = self.state.read();
-            Arc::clone(&guard)
-        };
+        let snapshot = self.snapshot();
 
-        for memtable in std::iter::once(&snapshot.memtable).chain(snapshot.imm_memtables.iter()) {
+        for memtable in snapshot.memtables() {
             let maybe_val = memtable.get(_key);
             if maybe_val.is_none() {
                 continue;
@@ -315,9 +327,11 @@ impl LsmStorageInner {
             return Ok(maybe_val.filter(|v| !v.is_empty()));
         }
 
-        for ss_table_idx in &snapshot.l0_sstables {
-            let table = Arc::clone(&snapshot.sstables[ss_table_idx]);
-            // TODO: reduce number of disk reads
+        for table in snapshot.l0_ssts() {
+            let table = Arc::clone(table);
+            if _key < table.first_key().raw_ref() || _key > table.last_key().raw_ref() {
+                continue;
+            }
             let iter = SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(_key))?;
             if iter.is_valid() && iter.key().raw_ref() == _key {
                 return Ok(Some(Bytes::copy_from_slice(iter.value())).filter(|v| !v.is_empty()));
@@ -399,20 +413,18 @@ impl LsmStorageInner {
         _lower: Bound<&[u8]>,
         _upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        let snapshot = {
-            let guard = self.state.read();
-            Arc::clone(&guard)
-        };
+        let snapshot = self.snapshot();
         let mut iters = Vec::new();
-        for memtable in std::iter::once(&snapshot.memtable).chain(snapshot.imm_memtables.iter()) {
+        for memtable in snapshot.memtables() {
             let iter = memtable.scan(_lower, _upper);
             iters.push(Box::new(iter));
         }
         let merged_memtable_iter = MergeIterator::create(iters);
 
         let mut ss_table_iters = Vec::new();
-        for ss_table_idx in &snapshot.l0_sstables {
-            let table = Arc::clone(&snapshot.sstables[ss_table_idx]);
+        for table in snapshot.l0_ssts() {
+            let table = Arc::clone(table);
+            // TODO: skip tables that cannot overlap [lower, upper] using first_key/last_key,
             let ss_table_iter = match _lower {
                 Bound::Included(x) => {
                     SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(x))?
