@@ -314,6 +314,15 @@ impl LsmStorageInner {
             }
             return Ok(maybe_val.filter(|v| !v.is_empty()));
         }
+
+        for ss_table_idx in &snapshot.l0_sstables {
+            let table = Arc::clone(&snapshot.sstables[ss_table_idx]);
+            // TODO: reduce number of disk reads
+            let iter = SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(_key))?;
+            if iter.is_valid() && iter.key().raw_ref() == _key {
+                return Ok(Some(Bytes::copy_from_slice(iter.value())).filter(|v| !v.is_empty()));
+            }
+        }
         Ok(None)
     }
 
