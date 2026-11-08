@@ -419,37 +419,27 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
+        let _state_guard = self.state_lock.lock();
+
         let Some(oldest_memtable) = self.state.read().imm_memtables.last().cloned() else {
             return Ok(());
         };
+        let sst_id = oldest_memtable.id();
+
         let mut sst_builder = SsTableBuilder::new(self.options.block_size);
         oldest_memtable.flush(&mut sst_builder)?;
-
-        let sst_id = self.next_sst_id();
         let sst = sst_builder.build(
             sst_id,
             Some(self.block_cache.clone()),
             self.path_of_sst(sst_id),
         )?;
 
-        let flushed_memtable_id = oldest_memtable.id();
-
-        let _state_guard = self.state_lock.lock();
         let mut new_state = self.state.read().as_ref().clone();
-        if new_state
-            .imm_memtables
-            .last()
-            .is_some_and(|t| t.id() == flushed_memtable_id)
-        {
-            new_state.imm_memtables.pop();
-            new_state.sstables.insert(sst_id, Arc::new(sst));
-            new_state.l0_sstables.insert(0, sst_id);
-            *self.state.write() = Arc::new(new_state);
-        } else {
-            drop(sst);
-            let _ = std::fs::remove_file(self.path_of_sst(sst_id)); // best-effort cleanup
-            // TODO: Error?
-        }
+        let removed = new_state.imm_memtables.pop().unwrap();
+        debug_assert_eq!(removed.id(), sst_id);
+        new_state.sstables.insert(sst_id, Arc::new(sst));
+        new_state.l0_sstables.insert(0, sst_id);
+        *self.state.write() = Arc::new(new_state);
         Ok(())
     }
 
