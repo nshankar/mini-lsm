@@ -87,6 +87,8 @@ impl Bloom {
 
     /// Build bloom filter from key hashes
     pub fn build_from_key_hashes(keys: &[u32], bits_per_key: usize) -> Self {
+        // for a Bloom filter with m bits and n keys the false-positive rate is lowest when
+        // k is (m / n) * ln(2)
         let k = (bits_per_key as f64 * 0.69) as u32;
         let k = k.clamp(1, 30);
         let nbits = (keys.len() * bits_per_key).max(64);
@@ -95,7 +97,13 @@ impl Bloom {
         let mut filter = BytesMut::with_capacity(nbytes);
         filter.resize(nbytes, 0);
 
-        // TODO: build the bloom filter
+        for &(mut h) in keys {
+            let delta = h.rotate_left(15);
+            for _ in 0..k {
+                filter.set_bit(h as usize % nbits, true);
+                h = h.wrapping_add(delta);
+            }
+        }
 
         Self {
             filter: filter.freeze(),
@@ -111,8 +119,13 @@ impl Bloom {
         } else {
             let nbits = self.filter.bit_len();
             let delta = h.rotate_left(15);
-
-            // TODO: probe the bloom filter
+            let mut h = h;
+            for _ in 0..self.k {
+                if !self.filter.get_bit(h as usize % nbits) {
+                    return false;
+                }
+                h = h.wrapping_add(delta);
+            }
 
             true
         }
