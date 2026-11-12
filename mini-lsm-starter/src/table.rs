@@ -145,23 +145,36 @@ impl SsTable {
         const U32_SIZE: u64 = std::mem::size_of::<u32>() as u64;
 
         let size = file.size();
-        if size < U32_SIZE {
-            bail!("sst {id}: file is {size} bytes, too small to hold the meta offset");
+        // Layout: [blocks][block meta][meta offset: u32][bloom][bloom offset: u32]
+        if size < 2 * U32_SIZE {
+            bail!("sst {id}: file is {size} bytes, too small to hold the meta and bloom offsets");
         }
-        let block_meta_offset = u32::from_be_bytes(
-            file.read(file.size() - U32_SIZE, U32_SIZE)
-                .expect("Failed to read file metadata")
+        let read_u32 = |offset: u64| -> Result<u64> {
+            let bytes: [u8; 4] = file
+                .read(offset, U32_SIZE)?
                 .try_into()
-                .expect("Failed to decode file metadata"),
-        ) as usize;
+                .expect("read returns exactly the requested length");
+            Ok(u32::from_be_bytes(bytes) as u64)
+        };
+
+        let bloom_offset = read_u32(size - U32_SIZE)?;
+        if bloom_offset < U32_SIZE || bloom_offset > size - U32_SIZE {
+            bail!("sst {id}: bloom offset {bloom_offset} out of range for file of {size} bytes");
+        }
+        let bloom = Bloom::decode(&file.read(bloom_offset, size - U32_SIZE - bloom_offset)?)?;
+
+        let meta_end = bloom_offset - U32_SIZE;
+        let block_meta_offset = read_u32(meta_end)?;
+        if block_meta_offset > meta_end {
+            bail!(
+                "sst {id}: meta offset {block_meta_offset} out of range (meta ends at {meta_end})"
+            );
+        }
         let block_meta = BlockMeta::decode_block_meta(
-            file.read(
-                block_meta_offset as u64,
-                file.size() - U32_SIZE - block_meta_offset as u64,
-            )
-            .expect("Failed to decode file metadata")
-            .as_slice(),
+            file.read(block_meta_offset, meta_end - block_meta_offset)?
+                .as_slice(),
         );
+        let block_meta_offset = block_meta_offset as usize;
 
         let (Some(first), Some(last)) = (block_meta.first(), block_meta.last()) else {
             bail!("sst {id}: meta section is empty, SST has no blocks");
@@ -177,7 +190,7 @@ impl SsTable {
             block_cache,
             first_key,
             last_key,
-            bloom: None,
+            bloom: Some(bloom),
             max_ts: 0,
         })
     }

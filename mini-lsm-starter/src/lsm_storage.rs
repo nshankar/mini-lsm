@@ -352,6 +352,12 @@ impl LsmStorageInner {
             if _key < table.first_key().raw_ref() || _key > table.last_key().raw_ref() {
                 continue;
             }
+            // Skip when there is a bloom filter that tells us we can skip
+            if let Some(bloom) = &table.bloom
+                && !bloom.may_contain(farmhash::fingerprint32(_key))
+            {
+                continue;
+            }
             let iter = SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(_key))?;
             if iter.is_valid() && iter.key().raw_ref() == _key {
                 return Ok(Some(Bytes::copy_from_slice(iter.value())).filter(|v| !v.is_empty()));

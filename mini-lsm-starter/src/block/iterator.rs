@@ -29,18 +29,22 @@ pub struct BlockIterator {
     /// Current index of the key-value pair, should be in range of [0, num_of_elements)
     idx: usize,
     /// The first key in the block
-    first_key: KeyVec, // TODO: why is this unused?
+    first_key: KeyVec,
 }
 
 impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
-        Self {
+        let mut iter = Self {
             block,
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
             first_key: KeyVec::new(),
-        }
+        };
+        // Position on entry 0 to capture the block's first key; stays empty for an empty block.
+        iter.seek_to_first();
+        iter.first_key = iter.key.clone();
+        iter
     }
 
     /// Creates a block iterator and seek to the first entry.
@@ -80,19 +84,26 @@ impl BlockIterator {
             return;
         };
         let offset = offset as usize;
-        let key_start = offset + std::mem::size_of::<u16>();
+        const U16_SIZE: usize = std::mem::size_of::<u16>();
 
-        let key_len =
-            u16::from_be_bytes(self.block.data[offset..key_start].try_into().unwrap()) as usize;
-        let key_end = key_start + key_len;
-        let key = KeyVec::from_vec(self.block.data[key_start..key_end].to_vec());
+        // Entry layout: overlap (u16) | rest_len (u16) | rest | value_len (u16) | value
+        let overlap_end = offset + U16_SIZE;
+        let rest_start = overlap_end + U16_SIZE;
+        let overlap =
+            u16::from_be_bytes(self.block.data[offset..overlap_end].try_into().unwrap()) as usize;
+        let rest_len =
+            u16::from_be_bytes(self.block.data[overlap_end..rest_start].try_into().unwrap())
+                as usize;
+        let rest_end = rest_start + rest_len;
 
-        let value_start = key_end + std::mem::size_of::<u16>() as usize;
-        let value_len = u16::from_be_bytes(
-            self.block.data[key_start + key_len..value_start]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let mut key_bytes = Vec::with_capacity(overlap + rest_len);
+        key_bytes.extend_from_slice(&self.first_key.raw_ref()[..overlap]);
+        key_bytes.extend_from_slice(&self.block.data[rest_start..rest_end]);
+        let key = KeyVec::from_vec(key_bytes);
+
+        let value_start = rest_end + U16_SIZE;
+        let value_len =
+            u16::from_be_bytes(self.block.data[rest_end..value_start].try_into().unwrap()) as usize;
         let value_range = (value_start, value_start + value_len);
 
         (self.idx, self.key, self.value_range) = (idx, key, value_range);

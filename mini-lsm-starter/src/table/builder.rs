@@ -23,9 +23,14 @@ use crate::{
     block::BlockBuilder,
     key::{KeySlice, KeyVec},
     lsm_storage::BlockCache,
-    table::FileObject,
+    table::{FileObject, bloom::Bloom},
 };
+use farmhash::fingerprint32;
 
+struct BloomInputs {
+    key_hashes: Vec<u32>,
+    false_positive_rate: f64,
+}
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
     builder: BlockBuilder,
@@ -34,6 +39,7 @@ pub struct SsTableBuilder {
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
+    bloom_inputs: BloomInputs,
 }
 
 impl SsTableBuilder {
@@ -46,6 +52,10 @@ impl SsTableBuilder {
             data: Vec::new(),
             meta: Vec::new(),
             block_size,
+            bloom_inputs: BloomInputs {
+                key_hashes: Vec::new(),
+                false_positive_rate: 0.01,
+            },
         }
     }
 
@@ -65,6 +75,9 @@ impl SsTableBuilder {
             self.first_key = key.to_key_vec();
         }
         self.last_key = key.to_key_vec();
+        self.bloom_inputs
+            .key_hashes
+            .push(fingerprint32(key.raw_ref()));
     }
 
     fn write_block_to_data(&mut self) {
@@ -99,6 +112,18 @@ impl SsTableBuilder {
         let mut buf = self.data;
         BlockMeta::encode_block_meta(self.meta.as_slice(), &mut buf);
         buf.put_u32(meta_offset as u32);
+
+        let bloom = Bloom::build_from_key_hashes(
+            &self.bloom_inputs.key_hashes,
+            Bloom::bloom_bits_per_key(
+                self.bloom_inputs.key_hashes.len(),
+                self.bloom_inputs.false_positive_rate,
+            ),
+        );
+        let bloom_offset = buf.len();
+        bloom.encode(&mut buf);
+        buf.put_u32(bloom_offset as u32);
+
         let file = FileObject::create(path.as_ref(), buf)?;
         SsTable::open(id, block_cache, file)
     }

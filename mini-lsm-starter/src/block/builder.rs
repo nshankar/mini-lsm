@@ -29,6 +29,10 @@ pub struct BlockBuilder {
     first_key: KeyVec,
 }
 
+fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
 impl BlockBuilder {
     /// Creates a new block builder.
     pub fn new(block_size: usize) -> Self {
@@ -58,8 +62,16 @@ impl BlockBuilder {
 
         self.offsets.push(self.data.len() as u16);
 
-        self.data.put_u16(key.len() as u16);
-        self.data.put_slice(key.raw_ref());
+        // The first entry is a special case: it is stored in full (overlap 0) so the reader can
+        // recover `first_key` from it.
+        let key_overlap_len = if self.offsets.len() == 1 {
+            0
+        } else {
+            common_prefix_len(self.first_key.raw_ref(), key.raw_ref())
+        };
+        self.data.put_u16(key_overlap_len as u16);
+        self.data.put_u16((key.len() - key_overlap_len) as u16);
+        self.data.put_slice(&key.raw_ref()[key_overlap_len..]);
         self.data.put_u16(value.len() as u16);
         self.data.put_slice(value);
 
