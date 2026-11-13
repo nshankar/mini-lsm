@@ -322,7 +322,7 @@ impl LsmStorageInner {
     }
 
     /// Take a consistent, immutable view of the current state.
-    fn snapshot(&self) -> Arc<LsmStorageState> {
+    pub fn snapshot(&self) -> Arc<LsmStorageState> {
         Arc::clone(&self.state.read())
     }
 

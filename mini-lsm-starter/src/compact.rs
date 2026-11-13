@@ -22,7 +22,7 @@ mod tiered;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 pub use leveled::{LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask};
 use serde::{Deserialize, Serialize};
 pub use simple_leveled::{
@@ -30,8 +30,10 @@ pub use simple_leveled::{
 };
 pub use tiered::{TieredCompactionController, TieredCompactionOptions, TieredCompactionTask};
 
+use crate::iterators::StorageIterator;
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CompactionTask {
@@ -123,12 +125,95 @@ pub enum CompactionOptions {
 }
 
 impl LsmStorageInner {
-    fn compact(&self, _task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
-        unimplemented!()
+    fn compact(&self, task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
+        let CompactionTask::ForceFullCompaction {
+            l0_sstables,
+            l1_sstables,
+        } = task
+        else {
+            unimplemented!()
+        };
+
+        let snapshot = self.snapshot();
+        let iters = l0_sstables
+            .iter()
+            .chain(l1_sstables)
+            .map(|id| {
+                let table = snapshot
+                    .sstables
+                    .get(id)
+                    .ok_or_else(|| anyhow!("compaction input sst {id} not found"))?;
+                Ok(Box::new(SsTableIterator::create_and_seek_to_first(
+                    Arc::clone(table),
+                )?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut merged = MergeIterator::create(iters);
+
+        let new_builder = || SsTableBuilder::new(self.options.block_size);
+        let finish = |builder: SsTableBuilder| -> Result<Arc<SsTable>> {
+            let id = self.next_sst_id();
+            Ok(Arc::new(builder.build(
+                id,
+                Some(self.block_cache.clone()),
+                self.path_of_sst(id),
+            )?))
+        };
+
+        let mut output = Vec::new();
+        let mut builder = new_builder();
+        let mut has_entries = false;
+        while merged.is_valid() {
+            // Tombstones can be dropped: the inputs are all of L0 and L1, so no older version
+            // of the key can survive outside the compaction.
+            if !merged.value().is_empty() {
+                if has_entries && builder.estimated_size() >= self.options.target_sst_size {
+                    output.push(finish(std::mem::replace(&mut builder, new_builder()))?);
+                }
+                builder.add(merged.key(), merged.value());
+                has_entries = true;
+            }
+            merged.next()?;
+        }
+        if has_entries {
+            output.push(finish(builder)?);
+        }
+        Ok(output)
     }
 
     pub fn force_full_compaction(&self) -> Result<()> {
-        unimplemented!()
+        let snapshot = self.state.read().as_ref().clone();
+        let l0_sstables = snapshot.l0_sstables.clone();
+        let l1_sstables = snapshot
+            .levels
+            .first()
+            .unwrap_or(&(1, Vec::new()))
+            .1
+            .clone();
+        let task = CompactionTask::ForceFullCompaction {
+            l0_sstables: l0_sstables.clone(),
+            l1_sstables: l1_sstables.clone(),
+        };
+        let ssts = self.compact(&task)?;
+
+        let _state_guard = self.state_lock.lock();
+        let mut new_state = self.state.read().as_ref().clone();
+        // pop snapshot ssts from new_state
+        new_state.l0_sstables.retain(|id| !l0_sstables.contains(id));
+        for id in l0_sstables.iter().chain(&l1_sstables) {
+            new_state.sstables.remove(id);
+        }
+        // push result ssts into new_state
+        let output_ids: Vec<usize> = ssts.iter().map(|sst| sst.sst_id()).collect();
+        for sst in ssts {
+            new_state.sstables.insert(sst.sst_id(), sst);
+        }
+        match new_state.levels.first_mut() {
+            Some(l1) => l1.1 = output_ids,
+            None => new_state.levels.push((1, output_ids)),
+        }
+        *self.state.write() = Arc::new(new_state);
+        Ok(())
     }
 
     fn trigger_compaction(&self) -> Result<()> {
