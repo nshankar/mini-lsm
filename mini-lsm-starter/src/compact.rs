@@ -184,35 +184,36 @@ impl LsmStorageInner {
     pub fn force_full_compaction(&self) -> Result<()> {
         let snapshot = self.state.read().as_ref().clone();
         let l0_sstables = snapshot.l0_sstables.clone();
-        let l1_sstables = snapshot
-            .levels
-            .first()
-            .unwrap_or(&(1, Vec::new()))
-            .1
-            .clone();
+        // levels[0] expected to exist
+        let l1_sstables = snapshot.levels[0].1.clone();
         let task = CompactionTask::ForceFullCompaction {
             l0_sstables: l0_sstables.clone(),
             l1_sstables: l1_sstables.clone(),
         };
         let ssts = self.compact(&task)?;
 
-        let _state_guard = self.state_lock.lock();
-        let mut new_state = self.state.read().as_ref().clone();
-        // pop snapshot ssts from new_state
-        new_state.l0_sstables.retain(|id| !l0_sstables.contains(id));
+        {
+            let _state_guard = self.state_lock.lock();
+            let mut new_state = self.state.read().as_ref().clone();
+            // pop snapshot ssts from new_state
+            new_state.l0_sstables.retain(|id| !l0_sstables.contains(id));
+            for id in l0_sstables.iter().chain(&l1_sstables) {
+                new_state.sstables.remove(id);
+            }
+            // push result ssts into new_state
+            let output_ids: Vec<usize> = ssts.iter().map(|sst| sst.sst_id()).collect();
+            for sst in ssts {
+                new_state.sstables.insert(sst.sst_id(), sst);
+            }
+            new_state.levels[0].1 = output_ids;
+            *self.state.write() = Arc::new(new_state);
+        }
+
+        // A crash before this leaves orphan files
+        // Readers still holding an old snapshot keep their open file handles on unix.
         for id in l0_sstables.iter().chain(&l1_sstables) {
-            new_state.sstables.remove(id);
+            std::fs::remove_file(self.path_of_sst(*id))?;
         }
-        // push result ssts into new_state
-        let output_ids: Vec<usize> = ssts.iter().map(|sst| sst.sst_id()).collect();
-        for sst in ssts {
-            new_state.sstables.insert(sst.sst_id(), sst);
-        }
-        match new_state.levels.first_mut() {
-            Some(l1) => l1.1 = output_ids,
-            None => new_state.levels.push((1, output_ids)),
-        }
-        *self.state.write() = Arc::new(new_state);
         Ok(())
     }
 
